@@ -1,0 +1,98 @@
+import cv2
+import threading
+import curses
+import atexit
+import traceback
+import time
+
+key = None
+
+def setupCurses():
+    try:
+        global stdscr
+        print '8'
+        stdscr = curses.initscr()
+        curses.noecho()
+        curses.cbreak()
+        stdscr.keypad(1)
+        curses.echo()
+        k = stdscr.getch()
+        time.sleep(200)
+    except:
+        stdscr.keypad(0)
+        curses.echo()
+        curses.nocbreak()
+        curses.endwin()
+        traceback.print_exc()
+        print(curses.ERR)
+    # finally:
+    #     stdscr.keypad(0)
+    #     curses.echo()
+    #     curses.nocbreak()
+    #     curses.endwin()
+    #     print 'finally'
+    #    traceback.print_exc()
+
+def cleanup():
+    curses.nocbreak()
+    stdscr.keypad(0)
+    curses.echo()
+    curses.endwin()
+    print 'cleaned up'
+
+
+class keyInput (threading.Thread):
+    global key
+#    global stdscr
+    def __init__(self, threadID, name, counter):
+        threading.Thread.__init__(self)
+        self.threadID = threadID
+        self.name = name
+        self.counter = counter
+        print '6'
+
+    def run():
+        try:
+            print 'waiting for key'
+            while True:
+#                k = raw_input()
+                k = stdscr.getch()
+                if k == 'Escape':
+                    print 'Escape'
+                elif k == 's':
+                    print 's'
+                elif k == 'e':
+                    key = k
+#               time.sleep(1000)
+        except Exception, e:
+            print 'Exception in thread: %s' % e.strerror
+            key = 'e'
+
+def main():
+    try:
+    #    global stdsrcr
+        print '1'
+        atexit.register(cleanup)
+        print '2'
+        setupCurses()
+        print '3'
+    #    time.sleep(1000)
+    #    print '3'
+        thread1 = keyInput(1, "thread-1", 1)
+        print '4'
+        thread.start()
+        print '5'
+    #    thread.start_new_thread(keyInput, ())
+        while True:
+            if key == 'e':
+                break
+    #            exit(0)
+    #        time.sleep(100)
+    except Exception, e:
+        print 'Exception caught, exiting threadTest'
+    finally:
+        print 'exiting'
+        exit(0)
+    
+if __name__ == "__main__":
+    main()
