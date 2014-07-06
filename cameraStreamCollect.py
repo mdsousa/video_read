@@ -18,6 +18,9 @@ import numpy as np
 import Queue
 from PIL import Image
 
+import readGPSData
+import saveCollection
+
 #
 # For each client sending video, need a socket for sending cmds and one for retrieving data
 #
@@ -36,14 +39,19 @@ sockfd1 = None
 sockfd2 = None
 addr1 = None
 streamThread1 = None
+serial_port = None # port for retrieving serial data (GPS)
+server_ip = '0.0.0.0'
+collection_location = None
+fps = None
 
 def signal_handler(signal, frame):
 #    global key
+    raise KeyboardInterrupt, "Signal Handler"
     print("\nCtrl-C pressed")
     cleanup()
 #    key = 'e'
     sys.exit(0)
-signal.signal(signal.SIGINT, signal_handler)
+#signal.signal(signal.SIGINT, signal_handler)
 
 def readConfig():
     global client1
@@ -52,19 +60,27 @@ def readConfig():
     global cmd_port2
     global stream_port1
     global stream_port2
+    global serial_port
     global stream_write_length
+    global collection_location
+    global fps
     try:
         parser = ConfigParser.ConfigParser()
         parser.read('config_pi_server.cfg')
         client1 = parser.get('configuration','client1')
 #        print('client1: %s' % client1)
         client2 = parser.get('configuration','client2')
-#        print('client2: %s' % client2)
+        print('client2: %s' % client2)
         cmd_port1 = int(parser.get('configuration','cmd_port1'))
         cmd_port2 = int(parser.get('configuration','cmd_port2'))
         stream_port1 = int(parser.get('configuration','stream_port1'))
         stream_port2 = int(parser.get('configuration','stream_port2'))
+        serial_port = int(parser.get('configuration','serial_port'))
         stream_write_length = int(parser.get('camera','stream_write_length'))
+        print('stream_write_length: %d' % stream_write_length)
+        fps = int(parser.get('camera','fps'))
+        print('fps: %d' % fps)
+        collection_location = parser.get('camera','collection_location')
     except ConfigParser.Error as e:
         print(e)
 
@@ -76,7 +92,9 @@ def cleanup():
     global sockfd2
     global stream_socket1
     global stream_socket1
+    global gpsDataThread
     print("cmd_socket1: %s" % cmd_socket1)
+    
     if sockfd1 is not None:
         print("closing down cmd_socket1")
         cmd_socket1.shutdown(socket.SHUT_RDWR)
@@ -250,7 +268,7 @@ class streamNetworkThread(threading.Thread):
                 time.sleep(0.01)
                 break
         except socket.error as e:
-            if e != None and e.errno == errno. ECONNREFUSED:
+            if e != None and e.errno == errno.ECONNREFUSED:
                 print('stream socket connect error: %s' % e)
                 time.sleep(0.1)
                 pass
@@ -258,12 +276,30 @@ class streamNetworkThread(threading.Thread):
 def main():
     global stream_socket1
     global stream_socket2
+    global gpsDataThread
+    gpsDataThread = None
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    recordImages = False
+    recordTime = None
 #    old_settings = termios.tcgetattr(sys.stdin)
     try:
+        readConfig()
+        numberOfFrames = stream_write_length*fps # how many frames to save when requested
+        print("Number of Frames: %d" % numberOfFrames)
+        gpsSocketQueue = Queue.Queue(1)
+        gpsDataQueue = Queue.Queue(1)
+        gpsSocketThread = threading.Thread(target=readGPSData.openSocket, args=(server_ip, serial_port, gpsSocketQueue))
+        gpsSocketThread.daemon = True
+        gpsSocketThread.start()
+        gpsDataThread = threading.Thread(target=readGPSData.readGPSDataFromSerial, args=(gpsSocketQueue, gpsDataQueue))
+        gpsDataThread.daemon = True
+        gpsDataThread.start()
+        gps_queue = Queue.Queue(1)
+        doneRecordingQueue = Queue.Queue(1)
+
         queue1 = Queue.Queue(3)
         queue2 = Queue.Queue(3)
         tlock = threading.Lock()
-        readConfig()
         time.sleep(0.001)
         cmdThread = cmdNetworkThread(1, "cmd thread", client1, client2, cmd_port1, cmd_port2)
         cmdThread.daemon = True
@@ -274,34 +310,89 @@ def main():
         streamThread2 = streamNetworkThread(2, 'Stream from ' + client2, stream_port2, queue2, tlock)
         streamThread2.daemon = True
         streamThread2.start()
-        time.sleep(0.1)
+
+        recordImagesLeftQueue = Queue.Queue(1)
+        recordImagesRightQueue = Queue.Queue(1)
         name = 'NH Video Collect'
-#        cv2.namedWindow(name, cv2.CV_WINDOW_AUTOSIZE)
         cv2.namedWindow(name, cv2.WINDOW_NORMAL)
-#        cv2.namedWindow(name, cv2.WINDOW_NORMAL | cv2.WINDOW_OPENGL)
-        time.sleep(0.1)
- #       tty.setcbreak(sys.stdin.fileno())
+#        cv2.resizeWindow(name, 900, 450)
+        time.sleep(0.25)
+        count = 1
         while True:
             im1 = queue1.get()
-#            print "got pic1"
             im2 = queue2.get()
-#            print "got pic2"
-#            cv2.imshow(name, im1)
+            nmea_str = None
+            try:
+                nmea_str = gpsDataQueue.get(True, 0.01)
+            except Queue.Empty:
+                pass
+            if( recordImages ):
+                try:
+                    recordImagesLeftQueue.put(im1)
+                    recordImagesRightQueue.put(im2)
+                    gps_queue.put(nmea_str)
+                    if( count > numberOfFrames ):
+                        doneRecordingQueue.put(True, 0.01)
+                        print("%d Stopping recording" % count)
+                        count = 0
+                        recordImages = False
+                    else:
+                        count += 1
+
+                    # if( count > numberOfFrames ):
+                    #     print('Stopping recording')
+                    #     doneRecordingQueue.put(True)
+                    #     time.sleep(0.5)
+                    #     recordImages = False
+                    #     # queue1 = 1
+                    #     # while not doneRecordigQueue.empty():
+                    #     #     print("%d Clearing Queue" % queue1)
+                    #     #     try:
+                    #     #         doneRecordingQueue.get(False)
+                    #     #     except Queue.Empty:
+                    #     #         pass
+                    #     #     queue1 += 1
+                    #     count = 0
+                    #     print('Done recording')
+                    # else:
+                    #     recordImagesLeftQueue.put(im1)
+                    #     recordImagesRightQueue.put(im2)
+                    #     gps_queue.put(nmea_str)
+                    #     doneRecordingQueue.put(False)
+                except Queue.Empty:
+                    print('doneRecordingQueue empty')
+                    pass
+
             both = np.hstack( (im1,im2) )
+
+#            print("nmea_str = %s" % nmea_str)
+#            width = np.size(both,1)
+#            height = np.size(both,0)
+#            cv2.putText(both, nmea_str, (width/2,height/2), font, 5.0, (255,255,255))
+#            cv2.putText(both, nmea_str, (width/2,height/2), font, 5, (255,255,255), 3, cv2.CV_AA)
+
             cv2.imshow(name, both)
             cv2.waitKey(1)
-#            time.sleep(0.001)
+            time.sleep(0.001)
+#            time.sleep(0.2)
+
             if select.select([sys.stdin], [], [], 0) == ([sys.stdin], [], []):
                 key = sys.stdin.read(1)
                 if key == "e":
-#                    print("key == e")
+                    print("key == e")
                     sendCmd("e")
                     time.sleep(0.5) # give clients time to cleanup before killing connections
 #                print("key == %c" % key)
                     break
                 elif key == "r":
-#                    print("key == r")
-                    sendCmd("r")
+                    print("key == r")
+                    recordImages = True
+                    recordThread = threading.Thread(target=saveCollection.saveCollection, args=(collection_location, recordImagesLeftQueue, recordImagesRightQueue, gps_queue, doneRecordingQueue))
+                    recordThread.daemon = True
+                    recordThread.start()
+                    recordTime = time.time()
+                    print("Recording images")
+#                    sendCmd("r")
 #                print("key == $c\n" % key)
                 elif key == "s":
 #                    print("key == s")
@@ -322,10 +413,10 @@ def main():
 #                 print("key == s")
 #                 sendCmd("s")
 #    except Exception, e:
-    except:
+#    except:
 #        cleanup()
-        traceback.print_exc()
-        print('Exception caught, exiting cameraStreamCollect')
+#        traceback.print_exc()
+#        print('Exception caught, exiting cameraStreamCollect')
     finally:
         cleanup()
 #        traceback.print_exc()
@@ -335,4 +426,9 @@ def main():
         sys.exit(0)
     
 if __name__ == "__main__":
-    main()
+    signal.signal(signal.SIGINT, signal_handler)
+    try:
+        main()
+    except KeyboardInterrupt:
+        cleanup()
+        sys.exit(0)
