@@ -1,0 +1,1 @@
+python code that takes a pair of image streams over a couple of sockets and permits the user to view and save the video. It also collects GPS data over another socket and stores that data when requested.
